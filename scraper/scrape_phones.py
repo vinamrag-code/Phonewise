@@ -27,7 +27,6 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
-from requests.adapters import HTTPAdapter
 
 from backend.app.db import upsert_phone  # type: ignore[import]
 from scraper.phone_utils import normalise_phone_name, validate_phone_dict  # type: ignore[import]
@@ -75,23 +74,20 @@ class ScrapedPhone:
         }
 
 
-class _TLSAdapter(HTTPAdapter):
-    """
-    Custom adapter that relaxes TLS verification for environments with
-    broken CA bundles.  Using verify=False suppresses errors but also
-    silently swallows warnings; this approach makes the intent explicit
-    and only relaxes TLS — not other security checks.
-
-    FIX: The old code set s.verify = False globally which causes urllib3
-    to spam InsecureRequestWarning on every single request.  We now
-    suppress just that warning cleanly.
-    """
-    def send(self, *args, **kwargs):
-        kwargs.setdefault("verify", False)
-        return super().send(*args, **kwargs)
-
-
 def _create_session() -> requests.Session:
+    """
+    Create a requests Session with SSL verification disabled for phonedb.net.
+
+    phonedb.net serves a certificate whose issuer is not in many system CA
+    bundles (common on Linux with a minimal cert store). We disable
+    verification at the session level and suppress the urllib3
+    InsecureRequestWarning so logs stay clean.
+
+    FIX: The previous _TLSAdapter approach set verify=False inside send()
+    AFTER requests had already applied its own verify logic, so the SSL
+    error was never actually suppressed. Setting s.verify = False directly
+    on the session is the correct and reliable approach.
+    """
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -100,10 +96,7 @@ def _create_session() -> requests.Session:
         "User-Agent": USER_AGENT,
         "Accept-Language": "en-US,en;q=0.9",
     })
-    # Mount the relaxed-TLS adapter only for phonedb.net
-    adapter = _TLSAdapter()
-    s.mount("https://phonedb.net", adapter)
-    s.mount("http://phonedb.net", adapter)
+    s.verify = False  # phonedb.net has a broken CA chain on many Linux systems
     return s
 
 
@@ -186,15 +179,30 @@ def _parse_camera_mp(text: str) -> Optional[int]:
 
 def _parse_price_inr(specs: Dict[str, str]) -> float:
     """
-    Extract INR price from PhoneDB specs.
+    Extract price from PhoneDB specs.
 
-    FIX: Old regex r'(\d[\d,]*)\s*(?:inr|rs|₹)?' was non-anchored to the
-    currency symbol, so it matched any leading digit in the cell (e.g. a
-    resolution like '1080' became the 'price').  We now require the
-    currency marker to be present before extracting a number.
+    PhoneDB stores price as a bare number under the key 'Price', e.g.:
+        'Price' → '9999'
+
+    It never includes a currency symbol in that field, so we must NOT
+    require one.  We read the 'Price' key directly and parse the first
+    numeric value from it.
+
+    We still do a currency-symbol scan as a secondary fallback for any
+    site that does embed INR / Rs / ₹ in a field value.
     """
+    def _extract_number(text: str) -> Optional[float]:
+        """Return the first numeric value (with optional commas) in text."""
+        m = re.search(r'([\d,]+(?:\.\d{1,2})?)', text.strip())
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except ValueError:
+                return None
+        return None
+
     def _amount_after_currency(text: str) -> Optional[float]:
-        """Match 'INR 14999', '₹14,999', 'Rs 14999'."""
+        """Match explicit markers: 'INR 14999', '₹14,999', 'Rs 14999'."""
         m = re.search(
             r'(?:INR|Rs\.?|₹)\s*([\d,]+(?:\.\d{1,2})?)',
             text,
@@ -207,19 +215,28 @@ def _parse_price_inr(specs: Dict[str, str]) -> float:
                 return None
         return None
 
-    # Prefer explicit price / geographical fields
+    # ── 1. Direct 'Price' key — PhoneDB stores a bare number here ────────────
+    raw_price = specs.get("Price", "").strip()
+    if raw_price:
+        amount = _extract_number(raw_price)
+        if amount is not None and amount > 0:
+            return amount
+
+    # ── 2. Any field whose *key* contains "price" or "geographical" ──────────
     for key, value in specs.items():
         key_lower = key.lower()
+        if key_lower == "price":
+            continue  # already handled above
         if "price" in key_lower or "geographical" in key_lower:
-            amount = _amount_after_currency(value)
-            if amount is not None:
+            amount = _amount_after_currency(value) or _extract_number(value)
+            if amount is not None and amount > 0:
                 return amount
 
-    # Fallback: any value that mentions INR / ₹
+    # ── 3. Fallback: any value that mentions INR / ₹ ─────────────────────────
     for value in specs.values():
         if "inr" in value.lower() or "₹" in value:
             amount = _amount_after_currency(value)
-            if amount is not None:
+            if amount is not None and amount > 0:
                 return amount
 
     return 0.0

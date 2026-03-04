@@ -1,4 +1,4 @@
-from backend.app.db import get_phones_collection
+from app.db import get_phones_collection
 
 coll = get_phones_collection()
 
