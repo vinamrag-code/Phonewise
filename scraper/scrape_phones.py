@@ -30,6 +30,7 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 
 from backend.app.db import upsert_phone  # type: ignore[import]
+from scraper.phone_utils import normalise_phone_name, validate_phone_dict  # type: ignore[import]
 
 
 BASE_URL = "https://phonedb.net"
@@ -279,6 +280,8 @@ def parse_device_page(html: str) -> Optional[ScrapedPhone]:
         logger.warning("Could not determine model name — skipping page")
         return None
 
+    name = normalise_phone_name(name)
+
     # ── OS ────────────────────────────────────────────────────────────────────
     os_name = _detect_os(
         specs.get("Platform", ""),
@@ -379,6 +382,9 @@ def run_scraper(max_devices: int = 150) -> int:
                 phone.name[:40], phone.battery, phone.camera,
                 phone.ram, phone.storage, phone.os, phone.price,
             )
+
+            for warning in validate_phone_dict(phone.to_dict()):
+                logger.warning(warning)
 
             upsert_phone(phone.to_dict())
             success_count += 1

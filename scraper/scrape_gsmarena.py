@@ -31,6 +31,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from backend.app.db import upsert_phone  # type: ignore[import]
+from scraper.phone_utils import normalise_phone_name, validate_phone_dict  # type: ignore[import]
 
 
 BASE_URL = "https://www.gsmarena.com"
@@ -368,6 +369,8 @@ def parse_device_page(html: str, url: str) -> Optional[ScrapedPhone]:
         name = url.split("/")[-1].replace(".php", "").replace("-", " ").title()
         logger.warning("Using URL-derived name for %s", url)
 
+    name = normalise_phone_name(name)
+
     # ── Specs table ───────────────────────────────────────────────────────────
     specs = _parse_specs_table(soup)
     if not specs:
@@ -431,6 +434,9 @@ def run_scraper(max_devices: int = 150) -> int:
                 phone.name[:40], phone.battery, phone.camera,
                 phone.ram, phone.storage, phone.os, phone.price,
             )
+
+            for warning in validate_phone_dict(phone.to_dict()):
+                logger.warning(warning)
 
             upsert_phone(phone.to_dict())
             success_count += 1
