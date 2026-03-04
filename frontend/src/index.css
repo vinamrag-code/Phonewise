@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-slate-950 text-slate-50 antialiased;
+}
+
+.card {
+  @apply rounded-xl border border-slate-800 bg-slate-900/60 shadow-lg shadow-black/40 transition-transform transition-shadow hover:-translate-y-1 hover:shadow-xl hover:shadow-black/60;
+}
+
