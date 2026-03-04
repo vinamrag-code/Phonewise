@@ -185,47 +185,54 @@ def _parse_specs_table(soup: BeautifulSoup) -> Dict[str, str]:
 def _parse_battery_info(specs: Dict[str, str]) -> int:
     """
     Parse battery capacity in mAh.
-    GSMArena key: 'Battery' under the Battery section.
-    Example values: "Li-Ion 5000 mAh, non-removable"
+
+    GSMArena quirk: the key 'Battery' holds a *benchmark score*
+    (e.g. 'Active use score 11:27h'), NOT the capacity.
+    The actual mAh value lives under 'Type' in the Battery section
+    (e.g. 'Li-Ion 3900 mAh, non-removable').
+
+    FIX: Scan ALL spec values for an mAh pattern, but explicitly skip
+    known non-capacity keys so we never mis-parse a benchmark row.
     """
+    # Keys that look like they could contain 'mAh' but actually don't
+    # hold capacity (benchmark / testing rows on GSMArena)
+    SKIP_KEYS = {
+        "battery", "battery (old)", "performance",
+        "display", "camera", "loudspeaker",
+    }
     for key, value in specs.items():
-        if "battery" in key.lower():
-            match = re.search(r'(\d[\d,]+)\s*mAh', value, re.IGNORECASE)
-            if match:
-                return int(match.group(1).replace(",", ""))
+        if key.lower() in SKIP_KEYS:
+            continue
+        match = re.search(r'(\d[\d,]+)\s*mAh', value, re.IGNORECASE)
+        if match:
+            return int(match.group(1).replace(",", ""))
     return 0
 
 
 def _parse_camera_info(specs: Dict[str, str]) -> int:
     """
     Parse main (rear) camera megapixels.
-    GSMArena key: 'Main Camera' (newer pages) or 'Primary camera'.
-    Example: "50 MP, f/1.8, 24mm (wide), 1/1.56\", 1.0µm, PDAF"
-    Returns the highest MP figure found (primary sensor).
+
+    GSMArena quirk: there is NO key called 'Main Camera'.
+    The rear camera entry uses the *configuration name* as the key:
+      'Single', 'Dual', 'Triple', 'Quad', 'Penta'
+    e.g. 'Triple' → '50 MP, f/1.8 ... 10 MP, f/2.4 ... 12 MP, f/2.2'
+
+    FIX: Match against the known configuration-name keys and return the
+    highest MP value found (the primary sensor). Skip front/selfie rows.
     """
-    # Priority order: 'Main Camera' is the GSMArena label for the rear camera section
-    priority_keys = ["Main Camera", "Single", "Dual", "Triple", "Quad", "Penta"]
+    CAM_CONFIG_KEYS = {"single", "dual", "triple", "quad", "penta"}
+    SKIP_KEYS = {"front", "selfie", "secondary", "sec.", "video", "features"}
 
-    # First try the main camera field directly
-    for key in list(specs.keys()):
-        if key.lower() in ("main camera",):
-            value = specs[key]
-            mp_vals = re.findall(r'(\d+)\s*MP', value, re.IGNORECASE)
-            if mp_vals:
-                return max(int(v) for v in mp_vals)
-
-    # Fallback: scan all keys that look like camera entries
     best_mp = 0
     for key, value in specs.items():
         key_lower = key.lower()
-        # Avoid front/selfie cameras
-        if any(skip in key_lower for skip in ("front", "selfie", "video", "features", "secondary")):
+        if any(s in key_lower for s in SKIP_KEYS):
             continue
-        if any(cam in key_lower for cam in ("camera", "single", "dual", "triple", "quad")):
-            mp_vals = re.findall(r'(\d+)\s*MP', value, re.IGNORECASE)
-            if mp_vals:
-                best_mp = max(best_mp, max(int(v) for v in mp_vals))
-
+        if key_lower in CAM_CONFIG_KEYS or "camera" in key_lower:
+            hits = re.findall(r'(\d+(?:\.\d+)?)\s*MP', value, re.IGNORECASE)
+            if hits:
+                best_mp = max(best_mp, max(int(round(float(h))) for h in hits))
     return best_mp
 
 
@@ -313,24 +320,29 @@ def _parse_os_info(specs: Dict[str, str]) -> str:
 
 def _parse_price(specs: Dict[str, str]) -> float:
     """
-    Try to extract price (INR preferred) from the specs.
-    GSMArena key: 'Price' under the Misc / Launch section.
-    Example values:
-      "About 900 EUR"
-      "INR 79,999"
-      "$ 999"
+    Extract price (INR preferred) from GSMArena specs.
 
-    FIX: Old version looked for 'Price group' / 'Launch price' which are
-    not real GSMArena keys. The real key is 'Price'.
-    We now prefer an INR value and fall back to any numeric price.
+    GSMArena 'Price' field contains multiple currencies separated by ' / ':
+        '$ 240.00 / C$ 275.00 / £ 210.00 / EUR 338.95 / ₹[THIN SPACE]61,990'
+
+    The ₹ symbol is followed by a Unicode THIN SPACE (U+2009), not a
+    regular space — this silently broke the INR regex match.
+
+    FIX: Normalise all Unicode whitespace variants to a plain space before
+    matching. Prefer INR; fall back to the first numeric value found.
     """
-    raw = specs.get("Price", "")
-    if not raw or raw.strip().lower() in ("n/a", "unavailable", ""):
+    raw = specs.get("Price", "").strip()
+    if not raw or raw.lower() in ("n/a", "unavailable"):
         return 0.0
 
-    # Prefer explicit INR amount
+    # Collapse Unicode thin/narrow/non-breaking spaces → regular space
+    normalised = re.sub(r'[\u2009\u00a0\u202f\u2007\u200a]', ' ', raw)
+
+    # Prefer INR (₹) amount
     inr_match = re.search(
-        r'(?:INR|Rs\.?|₹)\s*([\d,]+(?:\.\d{1,2})?)', raw, re.IGNORECASE
+        r'(?:INR|Rs\.?|₹)\s*([\d,]+(?:\.\d{1,2})?)',
+        normalised,
+        re.IGNORECASE,
     )
     if inr_match:
         try:
@@ -338,8 +350,8 @@ def _parse_price(specs: Dict[str, str]) -> float:
         except ValueError:
             pass
 
-    # Fall back to any leading price figure (e.g. "About 900 EUR" → 900)
-    num_match = re.search(r'([\d,]+(?:\.\d{1,2})?)', raw)
+    # Fallback: first numeric value in the field
+    num_match = re.search(r'([\d,]+(?:\.\d{1,2})?)', normalised)
     if num_match:
         try:
             return float(num_match.group(1).replace(",", ""))
