@@ -15,7 +15,7 @@ from .recommendation import recommend_phones
 settings = get_settings()
 
 app = FastAPI(
-    title=settings.app_name,
+    title="Phonewise API",
     description="Backend API for the Smart Phone Recommendation web application.",
     version="1.0.0",
 )

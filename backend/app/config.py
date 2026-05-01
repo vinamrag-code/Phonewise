@@ -1,22 +1,16 @@
-import os
-from functools import lru_cache
-
-from pydantic import BaseModel
 from dotenv import load_dotenv
+import os
 
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
 
-load_dotenv()
+from pydantic_settings import BaseSettings
 
+class Settings(BaseSettings):
+    MONGO_URI: str
+    app_name: str = "Phonewise API" 
+    MONGO_DB: str = "phone_recommender"
+    PHONES_COLLECTION: str = "phones"
+    API_SECRET_TOKEN: str = "change-me"
 
-class Settings(BaseModel):
-    app_name: str = "Smart Phone Recommender API"
-    mongo_uri: str = os.getenv("MONGO_URI", "mongodb://localhost:27017")
-    mongo_db: str = os.getenv("MONGO_DB", "phone_recommender")
-    phones_collection: str = os.getenv("PHONES_COLLECTION", "phones")
-    api_secret_token: str = os.getenv("API_SECRET_TOKEN", "change-me")  # for simple admin protection
-
-
-@lru_cache
-def get_settings() -> Settings:
+def get_settings():
     return Settings()
-
